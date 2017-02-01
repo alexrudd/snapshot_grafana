@@ -15,6 +15,7 @@ import (
 var (
 	timeLayout    = "2006-01-02 15:04:05"
 	grafanaAddr   = flag.String("grafana_addr", "http://localhost:3000/", "The address of the Grafana instance to snapshot.")
+	grafanaAPIKey = flag.String("grafana_api_key", "", "The address of the Grafana instance to snapshot.")
 	dashSlug      = flag.String("dashboard_slug", "home", "The url friendly version of the dashboard title to snapshot from the \"grafana_addr\" address.")
 	snapshotAddr  = flag.String("snapshot_addr", *grafanaAddr, "The location to submit the snapshot. Defaults to the grafana address.")
 	fromTimestamp = flag.String("from", (time.Now().Truncate(time.Hour * 24)).Format(timeLayout), "The \"from\" time range. Must be absolute in the form \"YYYY-MM-DD HH:mm:ss\" (\"2017-01-23 12:34:56\"). Defaults to start of day.")
@@ -25,6 +26,7 @@ var (
 
 type config struct {
 	grafanaAddr  url.URL
+	apiKey       string
 	dashSlug     string
 	snapshotAddr url.URL
 	from         time.Time
@@ -49,6 +51,12 @@ func parseAndValidateFlags() (*config, error) {
 		gURL.Path = gURL.Path + "/"
 	}
 	config.grafanaAddr = *gURL
+
+	// Grafana API key
+	if len(*grafanaAPIKey) == 0 {
+		return nil, errors.New("\"grafana_api_key\" cannot be empty")
+	}
+	config.apiKey = *grafanaAPIKey
 
 	// Dashboard slug
 	if strings.Index(*dashSlug, " ") != -1 {
@@ -95,6 +103,29 @@ func parseAndValidateFlags() (*config, error) {
 	return config, nil
 }
 
+func getDashboardDef(config *config) (string, error) {
+	// Get dashboard def
+	reqURL := config.grafanaAddr
+	reqURL.Path = reqURL.Path + "api/dashboards/db/" + config.dashSlug
+	log.Debugf("Requesting dashboard definition from: %s", reqURL.String())
+
+	req, err := http.NewRequest("get", reqURL.String(), nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Add("Authorization", "Bearer "+config.apiKey)
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
 func main() {
 	// Configure
 	config, err := parseAndValidateFlags()
@@ -104,6 +135,7 @@ func main() {
 	}
 	log.Info("Snapshot config:")
 	log.Infof("Grafana Address: %s", config.grafanaAddr.String())
+	log.Infof("Grafana API Key: %s", config.apiKey)
 	log.Infof("Dashboard Slug: %s", config.dashSlug)
 	log.Infof("Snapshot Address: %s", config.snapshotAddr.String())
 	log.Infof("From Timestamp: %s", config.from.String())
@@ -113,17 +145,11 @@ func main() {
 		log.Infof("  %s = %s", k, v)
 	}
 
-	// Get dashboard def
-	reqURL := config.grafanaAddr
-	reqURL.Path = reqURL.Path + "api/dashboards/db/" + config.dashSlug
-	log.Debugf("Requesting dashboard definition from: %s", reqURL.String())
-	resp, err := http.Get(reqURL.String())
+	dash, err := getDashboardDef(config)
 	if err != nil {
 		log.Error(err)
 		log.Exit(1)
 	}
-	defer resp.Body.Close()
-	body, err := ioutil.ReadAll(resp.Body)
-	log.Infof("%s", string(body))
-
+	log.Infof("Fetched dashboard definition for \"%s\"", config.dashSlug)
+	log.Debug(dash)
 }
