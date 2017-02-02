@@ -206,16 +206,18 @@ func substituteVars(config *config, dashboardString string) (string, error) {
 	return dashboardString, nil
 }
 
+// Implementation of CancelableTransport (https://gowalker.org/github.com/prometheus/client_golang/api/prometheus#CancelableTransport)
+// Required to intercept the api requests and add the auth header for going
+// through the Grafana datasource proxy
 type grafanaProxyTransport struct {
 	http.Transport
 	grafanaAPIKey string
 }
 
+// Adds the Grafana API key auth header to any request
 func (gpt *grafanaProxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	req.Header.Add("Authorization", "Bearer "+gpt.grafanaAPIKey)
-	t := http.Transport{}
-	resp, err := t.RoundTrip(req)
-	return resp, err
+	return (&http.Transport{}).RoundTrip(req)
 }
 
 func fetchDataPointsPrometheus(config *config, target, datasource map[string]interface{}, step float64) ([]snapshotData, error) {
@@ -223,8 +225,8 @@ func fetchDataPointsPrometheus(config *config, target, datasource map[string]int
 	reqURL.Path = reqURL.Path + "api/datasources/proxy/" + strconv.Itoa(int(datasource["id"].(float64)))
 	log.Debugf("Requesting data points from: %s", reqURL.String())
 
+	// Use our Grafana proxy transport with configured API key
 	transport := grafanaProxyTransport{grafanaAPIKey: config.apiKey}
-
 	client, err := prometheus.New(prometheus.Config{Address: reqURL.String(), Transport: &transport})
 	if err != nil {
 		return nil, err
@@ -352,12 +354,15 @@ func main() {
 				if target["intervalFactor"] != nil {
 					intervalFactor = target["intervalFactor"].(float64)
 				}
-				queryRange := config.to.Sub(config.from).Seconds()
-				maxDataPoints := float64(500)
-				step := math.Ceil((queryRange / maxDataPoints) * intervalFactor)
-				if queryRange/step > 11000 {
-					step = math.Ceil(queryRange / 11000)
+				interval := time.Second * 30
+				if target["interval"] != nil {
+					interval, err = time.ParseDuration(target["interval"].(string))
 				}
+				if err != nil {
+					log.Error(err)
+					log.Exit(1)
+				}
+				step := interval.Seconds() * intervalFactor
 				// Lookup datasource
 				datasource := datasourceMap[datasourceName].(map[string]interface{})
 
@@ -443,4 +448,7 @@ func main() {
 	}
 
 	log.Infof("Snapshot URL: %s", snapshotResponse["url"].(string))
+	log.Infof("Snapshot Key: %s", snapshotResponse["key"].(string))
+	log.Infof("Snapshot Delete URL: %s", snapshotResponse["deleteUrl"].(string))
+	log.Infof("Snapshot Delete Key: %s", snapshotResponse["deleteKey"].(string))
 }
