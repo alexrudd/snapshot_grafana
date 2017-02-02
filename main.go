@@ -1,31 +1,38 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io/ioutil"
 	"math"
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/api/prometheus"
 	"github.com/prometheus/common/model"
 	log "github.com/sirupsen/logrus"
 )
 
 var (
-	timeLayout    = "2006-01-02 15:04:05"
-	grafanaAddr   = flag.String("grafana_addr", "http://localhost:3000/", "The address of the Grafana instance to snapshot.")
-	grafanaAPIKey = flag.String("grafana_api_key", "", "The address of the Grafana instance to snapshot.")
-	dashSlug      = flag.String("dashboard_slug", "home", "The url friendly version of the dashboard title to snapshot from the \"grafana_addr\" address.")
-	snapshotAddr  = flag.String("snapshot_addr", *grafanaAddr, "The location to submit the snapshot. Defaults to the grafana address.")
-	fromTimestamp = flag.String("from", (time.Now().Truncate(time.Hour * 24)).Format(timeLayout), "The \"from\" time range. Must be absolute in the form \"YYYY-MM-DD HH:mm:ss\" (\"2017-01-23 12:34:56\"). Defaults to start of day.")
-	toTimestamp   = flag.String("to", time.Now().Format(timeLayout), "The \"to\" time range. Must be absolute in the form \"YYYY-MM-DD HH:mm:ss\" (\"2017-01-23 12:34:57\"). Must be greater than to \"to\" value. Defaults to now")
-	templateVars  = flag.String("template_vars", "", "a list of key value pairs to set the dashboard's template variables, in the format 'key1=val1;key2=val2'")
-	debug         = flag.Bool("debug", false, "Turns on debug logging")
+	timeLayout      = "2006-01-02 15:04:05"
+	grafanaAddr     = flag.String("grafana_addr", "http://localhost:3000/", "The address of the Grafana instance to snapshot.")
+	grafanaAPIKey   = flag.String("grafana_api_key", "", "The address of the Grafana instance to snapshot.")
+	dashSlug        = flag.String("dashboard_slug", "home", "The url friendly version of the dashboard title to snapshot from the \"grafana_addr\" address.")
+	snapshotAddr    = flag.String("snapshot_addr", "", "The location to submit the snapshot. Defaults to the grafana address.")
+	snapshotExpires = flag.Duration("snapshot_expires", 0, "How long to keep the snapshot for (60s, 1h, 10d, etc), defaults to never.")
+	snapshotName    = flag.String("snapshot_name", "", "What to call the snapshot. Defaults to \"from\" date plus dashboard slug.")
+	fromTimestamp   = flag.String("from", (time.Now().Truncate(time.Hour * 24)).Format(timeLayout), "The \"from\" time range. Must be absolute in the form \"YYYY-MM-DD HH:mm:ss\" (\"2017-01-23 12:34:56\"). Defaults to start of day.")
+	toTimestamp     = flag.String("to", time.Now().Format(timeLayout), "The \"to\" time range. Must be absolute in the form \"YYYY-MM-DD HH:mm:ss\" (\"2017-01-23 12:34:57\"). Must be greater than to \"to\" value. Defaults to now")
+	templateVars    = flag.String("template_vars", "", "a list of key value pairs to set the dashboard's template variables, in the format 'key1=val1;key2=val2'")
+	debug           = flag.Bool("debug", false, "Turns on debug logging")
 )
 
 type config struct {
@@ -33,9 +40,11 @@ type config struct {
 	apiKey       string
 	dashSlug     string
 	snapshotAddr url.URL
+	snapshotName string
 	from         time.Time
 	to           time.Time
 	vars         map[string]string
+	expires      int
 }
 
 type snapshotData struct {
@@ -84,7 +93,13 @@ func parseAndValidateFlags() (*config, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !strings.HasSuffix(sURL.Path, "/") {
+		sURL.Path = sURL.Path + "/"
+	}
 	config.snapshotAddr = *sURL
+
+	// Parse expiry
+	config.expires = int(*snapshotExpires / time.Second)
 
 	// From timestamp
 	from, err := time.Parse(timeLayout, *fromTimestamp)
@@ -98,6 +113,12 @@ func parseAndValidateFlags() (*config, error) {
 		return nil, err
 	}
 	config.to = to
+
+	// Parse name
+	if len(*snapshotName) == 0 {
+		*snapshotName = fmt.Sprintf("%s %s", config.to.Format("2006-01-02"), config.dashSlug)
+	}
+	config.snapshotName = *snapshotName
 
 	// Template vars
 	config.vars = make(map[string]string)
@@ -185,11 +206,70 @@ func substituteVars(config *config, dashboardString string) (string, error) {
 	return dashboardString, nil
 }
 
-func fetchDataPointsPrometheus(config *config, target, datasource map[string]interface{}) ([]snapshotData, error) {
-	return nil, nil
+type grafanaProxyTransport struct {
+	http.Transport
+	grafanaAPIKey string
 }
 
-func fetchDataPointsElastic(config *config, target, datasource map[string]interface{}) ([]snapshotData, error) {
+func (gpt *grafanaProxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.Header.Add("Authorization", "Bearer "+gpt.grafanaAPIKey)
+	t := http.Transport{}
+	resp, err := t.RoundTrip(req)
+	return resp, err
+}
+
+func fetchDataPointsPrometheus(config *config, target, datasource map[string]interface{}, step float64) ([]snapshotData, error) {
+	reqURL := config.grafanaAddr
+	reqURL.Path = reqURL.Path + "api/datasources/proxy/" + strconv.Itoa(int(datasource["id"].(float64)))
+	log.Debugf("Requesting data points from: %s", reqURL.String())
+
+	transport := grafanaProxyTransport{grafanaAPIKey: config.apiKey}
+
+	client, err := prometheus.New(prometheus.Config{Address: reqURL.String(), Transport: &transport})
+	if err != nil {
+		return nil, err
+	}
+	api := prometheus.NewQueryAPI(client)
+
+	// Query
+	val, err := api.QueryRange(context.Background(), target["expr"].(string), prometheus.Range{
+		Start: config.from,
+		End:   config.to,
+		Step:  time.Duration(step) * time.Second,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if val.Type() != model.ValMatrix {
+		return nil, fmt.Errorf("Unexpected value type: got %q, want %q", val.Type(), model.ValMatrix)
+	}
+	matrix, ok := val.(model.Matrix)
+	if !ok {
+		return nil, fmt.Errorf("Bug: val.Type() == model.ValMatrix, but type assertion failed")
+	}
+
+	results := make([]snapshotData, matrix.Len())
+	for idx, stream := range matrix {
+		datapoints := make([][]interface{}, len(stream.Values))
+		for idx, samplepair := range stream.Values {
+			if math.IsNaN(float64(samplepair.Value)) {
+				datapoints[idx] = []interface{}{nil, float64(samplepair.Timestamp)}
+			} else {
+				datapoints[idx] = []interface{}{float64(samplepair.Value), float64(samplepair.Timestamp)}
+			}
+		}
+
+		results[idx] = snapshotData{
+			Metric:     stream.Metric,
+			Datapoints: datapoints,
+		}
+	}
+
+	return results, nil
+}
+
+func fetchDataPointsElastic(config *config, target, datasource map[string]interface{}, step float64) ([]snapshotData, error) {
 	return nil, nil
 }
 
@@ -285,13 +365,13 @@ func main() {
 				var dataPoints []snapshotData
 				switch datasource["type"].(string) {
 				case "prometheus":
-					dataPoints, err = fetchDataPointsPrometheus(config, target, datasource)
+					dataPoints, err = fetchDataPointsPrometheus(config, target, datasource, step)
 					if err != nil {
 						log.Error(err)
 						log.Exit(1)
 					}
 				case "elasticsearch":
-					dataPoints, err = fetchDataPointsElastic(config, target, datasource)
+					dataPoints, err = fetchDataPointsElastic(config, target, datasource, step)
 					if err != nil {
 						log.Error(err)
 						log.Exit(1)
@@ -319,6 +399,48 @@ func main() {
 			}
 		}
 	}
-	b, err := json.Marshal(dash["dashboard"])
-	log.Info(string(b))
+
+	// Build Snapshot
+	snapshot := make(map[string]interface{})
+	snapshot["dashboard"] = dash["dashboard"]
+	snapshot["expires"] = config.expires
+	snapshot["name"] = config.snapshotName
+	b, err := json.Marshal(snapshot)
+
+	// Post Snapshot
+	reqURL := config.snapshotAddr
+	reqURL.Path = reqURL.Path + "api/snapshots"
+	log.Debugf("Posting snapshot to: %s", reqURL.String())
+
+	req, err := http.NewRequest("post", reqURL.String(), bytes.NewReader(b))
+	if err != nil {
+		log.Error(err)
+		log.Exit(1)
+	}
+	req.Header.Add("Authorization", "Bearer "+config.apiKey)
+	req.Header.Add("Content-Type", "application/json")
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		log.Error(err)
+		log.Exit(1)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		log.Errorf("Unexpected status code: %s", resp.Status)
+		log.Exit(1)
+	}
+	// read body
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		log.Error(err)
+		log.Exit(1)
+	}
+	// parse body
+	var snapshotResponse map[string]interface{}
+	if err = json.Unmarshal(body, &snapshotResponse); err != nil {
+		log.Error(err)
+		log.Exit(1)
+	}
+
+	log.Infof("Snapshot URL: %s", snapshotResponse["url"].(string))
 }
