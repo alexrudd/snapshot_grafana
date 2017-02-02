@@ -1,14 +1,18 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"io/ioutil"
+	"math"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
+	"github.com/prometheus/common/model"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -32,6 +36,14 @@ type config struct {
 	from         time.Time
 	to           time.Time
 	vars         map[string]string
+}
+
+type snapshotData struct {
+	Target     string          `json:"target"`
+	Datapoints [][]interface{} `json:"datapoints"`
+	// Metric is a set of labels (e.g. instance=alp) which is retained
+	// so that we can replace labels according to target.legendFormat.
+	Metric model.Metric `json:"-"`
 }
 
 func parseAndValidateFlags() (*config, error) {
@@ -126,6 +138,73 @@ func getDashboardDef(config *config) (string, error) {
 	return string(body), nil
 }
 
+func getDatasourceDefs(config *config) (map[string]interface{}, error) {
+	// Get datasource defs
+	reqURL := config.grafanaAddr
+	reqURL.Path = reqURL.Path + "api/datasources"
+	log.Debugf("Requesting datasource definitions from: %s", reqURL.String())
+
+	req, err := http.NewRequest("get", reqURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Add("Authorization", "Bearer "+config.apiKey)
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, errors.New("Unexpected status code: " + resp.Status)
+	}
+	// read body
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	// parse body
+	var datasources []interface{}
+	if err = json.Unmarshal(body, &datasources); err != nil {
+		return nil, err
+	}
+	// map datasources to their names
+	datasourceMap := make(map[string]interface{})
+	for _, ds := range datasources {
+		datasourceMap[ds.(map[string]interface{})["name"].(string)] = ds
+	}
+
+	return datasourceMap, nil
+}
+
+func substituteVars(config *config, dashboardString string) (string, error) {
+	for k, v := range config.vars {
+		vk := "$" + k
+		log.Debugf("Replacing \"%s\" with \"%s\"", vk, v)
+		dashboardString = strings.Replace(dashboardString, vk, v, -1)
+	}
+	return dashboardString, nil
+}
+
+func fetchDataPointsPrometheus(config *config, target, datasource map[string]interface{}) ([]snapshotData, error) {
+	return nil, nil
+}
+
+func fetchDataPointsElastic(config *config, target, datasource map[string]interface{}) ([]snapshotData, error) {
+	return nil, nil
+}
+
+var aliasRe = regexp.MustCompile(`{{\s*(.+?)\s*}}`)
+
+// renderTemplate is a re-implementation of renderTemplate in
+// Grafana’s Prometheus datasource; for the original, see:
+// https://github.com/grafana/grafana/blob/79138e211fac98bf1d12f1645ecd9fab5846f4fb/public/app/plugins/datasource/prometheus/datasource.ts#L263
+func renderTemplate(format string, metric model.Metric) string {
+	return aliasRe.ReplaceAllStringFunc(format, func(match string) string {
+		matches := aliasRe.FindStringSubmatch(match)
+		return string(metric[model.LabelName(matches[1])])
+	})
+}
+
 func main() {
 	// Configure
 	config, err := parseAndValidateFlags()
@@ -145,11 +224,101 @@ func main() {
 		log.Infof("  %s = %s", k, v)
 	}
 
-	dash, err := getDashboardDef(config)
+	// Get the dashboard to snapshot
+	rawDashString, err := getDashboardDef(config)
 	if err != nil {
 		log.Error(err)
 		log.Exit(1)
 	}
 	log.Infof("Fetched dashboard definition for \"%s\"", config.dashSlug)
-	log.Debug(dash)
+
+	// Get available datasources and map them to their names
+	datasourceMap, err := getDatasourceDefs(config)
+	if err != nil {
+		log.Error(err)
+		log.Exit(1)
+	}
+	log.Info("Fetched datasource definitions")
+
+	// Replace all templated variables
+	subbedDashString, err := substituteVars(config, rawDashString)
+	if err != nil {
+		log.Error(err)
+		log.Exit(1)
+	}
+	log.Infof("Substituted dashboard variables")
+
+	// Unmarshal it to a simplejson object
+	var dash map[string]interface{}
+	if err = json.Unmarshal([]byte(subbedDashString), &dash); err != nil {
+		log.Errorf("Could not decode dashboard json: %s", err.Error())
+		log.Exit(1)
+	}
+
+	// For each row in dashboard...
+	for _, row := range dash["dashboard"].(map[string]interface{})["rows"].([]interface{}) {
+		// For each panel in row...
+		for _, p := range row.(map[string]interface{})["panels"].([]interface{}) {
+			panel := p.(map[string]interface{})
+			// Get the datasource and targets
+			datasourceName := panel["datasource"].(string)
+			targets := panel["targets"].([]interface{})
+			// For each target in panel...
+			for _, t := range targets {
+				target := t.(map[string]interface{})
+				// Calculate “step” like Grafana. For the original code, see:
+				// https://github.com/grafana/grafana/blob/79138e211fac98bf1d12f1645ecd9fab5846f4fb/public/app/plugins/datasource/prometheus/datasource.ts#L83
+				intervalFactor := float64(1)
+				if target["intervalFactor"] != nil {
+					intervalFactor = target["intervalFactor"].(float64)
+				}
+				queryRange := config.to.Sub(config.from).Seconds()
+				maxDataPoints := float64(500)
+				step := math.Ceil((queryRange / maxDataPoints) * intervalFactor)
+				if queryRange/step > 11000 {
+					step = math.Ceil(queryRange / 11000)
+				}
+				// Lookup datasource
+				datasource := datasourceMap[datasourceName].(map[string]interface{})
+
+				// Fetch data points from datasource proxy
+				var dataPoints []snapshotData
+				switch datasource["type"].(string) {
+				case "prometheus":
+					dataPoints, err = fetchDataPointsPrometheus(config, target, datasource)
+					if err != nil {
+						log.Error(err)
+						log.Exit(1)
+					}
+				case "elasticsearch":
+					dataPoints, err = fetchDataPointsElastic(config, target, datasource)
+					if err != nil {
+						log.Error(err)
+						log.Exit(1)
+					}
+				default:
+					log.Errorf("Unsupported datasource type: %s", datasource["type"].(string))
+					continue
+				}
+				var snapshotData []interface{}
+				// build snapshot data
+				for idx, dp := range dataPoints {
+					if target["legendFormat"] != nil && target["legendFormat"].(string) != "" {
+						dp.Target = renderTemplate(target["legendFormat"].(string), dp.Metric)
+					} else {
+						dp.Target = dp.Metric.String()
+					}
+					dataPoints[idx] = dp
+					snapshotData = append(snapshotData, dp)
+				}
+				// insert snapshot data into panels
+				panel["snapshotData"] = snapshotData
+				panel["targets"] = []interface{}{}
+				panel["links"] = []interface{}{}
+				panel["datasource"] = []interface{}{}
+			}
+		}
+	}
+	b, err := json.Marshal(dash["dashboard"])
+	log.Info(string(b))
 }
