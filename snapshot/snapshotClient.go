@@ -166,7 +166,7 @@ func (sc *SnapClient) Take(config *TakeConfig) (*Snapshot, error) {
 	b, err := json.Marshal(snapshot)
 
 	// Post Snapshot
-	reqURL := sc.config.SnapshotAddr
+	reqURL := *sc.config.SnapshotAddr
 	reqURL.Path = reqURL.Path + "api/snapshots"
 	log.Debugf("Posting snapshot to: %s", reqURL.String())
 
@@ -200,7 +200,7 @@ func (sc *SnapClient) Take(config *TakeConfig) (*Snapshot, error) {
 
 func (sc *SnapClient) getDashboardDef(config *TakeConfig) (string, error) {
 	// Get dashboard def
-	reqURL := sc.config.GrafanaAddr
+	reqURL := *sc.config.GrafanaAddr
 	reqURL.Path = reqURL.Path + "api/dashboards/db/" + config.DashSlug
 
 	req, err := http.NewRequest("get", reqURL.String(), nil)
@@ -222,7 +222,7 @@ func (sc *SnapClient) getDashboardDef(config *TakeConfig) (string, error) {
 
 func (sc *SnapClient) getDatasourceDefs() (map[string]interface{}, error) {
 	// Get datasource defs
-	reqURL := sc.config.GrafanaAddr
+	reqURL := *sc.config.GrafanaAddr
 	reqURL.Path = reqURL.Path + "api/datasources"
 
 	req, err := http.NewRequest("get", reqURL.String(), nil)
@@ -280,7 +280,7 @@ func (gpt *grafanaProxyTransport) RoundTrip(req *http.Request) (*http.Response, 
 }
 
 func (sc *SnapClient) fetchDataPointsPrometheus(config *TakeConfig, target, datasource map[string]interface{}, step float64) ([]snapshotData, error) {
-	reqURL := sc.config.GrafanaAddr
+	reqURL := *sc.config.GrafanaAddr
 	reqURL.Path = reqURL.Path + "api/datasources/proxy/" + strconv.Itoa(int(datasource["id"].(float64)))
 	log.Debugf("Requesting data points from: %s", reqURL.String())
 
