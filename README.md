@@ -10,13 +10,13 @@ This tool is very much in development and is likely to change considerably.
 * ~~find out why timeshifted stuff doesn't work~~ (more of an issue with null "snapshotData" fields)
 * ~~make it usable as a cli tool~~ (barely)
 * ~~document~~ (some)
+* ~~Dockerise~~ (alexrudd/snapshot_grafana)
 * snapshot annotations
 * async the datasource reqs
 * "Take()" should take a context
 * use a json library instead of all that casting
 * support other datasources
 * builds
-* Dockerise
 
 # Usage
 
@@ -55,6 +55,15 @@ func main {
 ```sh
 go get github.com/alexrudd/snapshot_grafana
 snapshot_grafana \
+  -grafana_addr="http://grafana.myorg.com/" \
+  -grafana_api_key="eyJrIjoib3M0RDRWNmxYbnQ3bEJKNVUwOFE1Rk0wZnFrRXR3eDEiLCJuIjoia2V5IiwiaWQiOjN9" \
+  -dashboard_slug="my-dash-slug"
+```
+
+Or using Docker:
+
+```sh
+docker run --rm alexrudd/snapshot_grafana \
   -grafana_addr="http://grafana.myorg.com/" \
   -grafana_api_key="eyJrIjoib3M0RDRWNmxYbnQ3bEJKNVUwOFE1Rk0wZnFrRXR3eDEiLCJuIjoia2V5IiwiaWQiOjN9" \
   -dashboard_slug="my-dash-slug"
