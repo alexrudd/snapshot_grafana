@@ -24,28 +24,38 @@ This tool is very much in development and is likely to change considerably.
 
 ```go
 package main
-import "github.com/alexrudd/snapshot_grafana/snapshot"
 
-func main {
-  grafanaURL, _ := url.Parse("http://grafana.myorg.com/")
-  from := time.Date(2017, time.February, 05, 6, 0, 0, 0, time.Local)
+import (
+	"fmt"
+	"github.com/alexrudd/snapshot_grafana/snapshot"
+	"net/url"
+	"time"
+)
+
+func main() {
+	grafanaURL, _ := url.Parse("http://grafana.myorg.com/")
+	from := time.Date(2017, time.February, 05, 6, 0, 0, 0, time.Local)
 	to := time.Date(2017, time.February, 05, 12, 0, 0, 0, time.Local)
 
-  config := &snapshot.Config{
-    // The domain and path where your Grafana instance is located
-    GrafanaAddr:   grafanaURL,
-    // An api key which has admin privelages and access to the target dashboard
-    GrafanaAPIKey: "eyJrIjoib3M0RDRWNmxYbnQ3bEJKNVUwOFE1Rk0wZnFrRXR3eDEiLCJuIjoia2V5IiwiaWQiOjN9",
-  }
-  snapclient, _ := snapshot.NewSnapClient(config)
+	config := &snapshot.Config{
+		// The domain and path where your Grafana instance is located
+		GrafanaAddr: grafanaURL,
+		// An api key which has admin privelages and access to the target dashboard
+		GrafanaAPIKey: "eyJrIjoib3M0RDRWNmxYbnQ3bEJKNVUwOFE1Rk0wZnFrRXR3eDEiLCJuIjoia2V5IiwiaWQiOjN9",
+	}
+	snapclient, _ := snapshot.NewSnapClient(config)
 
-  takeConfig := &snapshot.TakeConfig{
-    DashSlug: "my-dash-slug",
-    From:     &from,
-    To:       &to,
-  }
-  snapshot, _ := snapclient.Take(takeConfig)
-
+	takeConfig := &snapshot.TakeConfig{
+		DashSlug: "my-dash-slug",
+		From:     &from,
+		To:       &to,
+	}
+	snapshot, err := snapclient.Take(takeConfig)
+	if err != nil {
+		fmt.Println(err.Error())
+		return
+	}
+	fmt.Println(snapshot.URL)
 }
 
 ```
