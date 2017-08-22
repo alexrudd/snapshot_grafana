@@ -14,8 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/coreos/fleet/log"
-	"github.com/prometheus/client_golang/api/prometheus"
+	"log"
+	"github.com/prometheus/client_golang/api"
+	"github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/common/model"
 )
 
@@ -168,7 +169,7 @@ func (sc *SnapClient) Take(config *TakeConfig) (*Snapshot, error) {
 	// Post Snapshot
 	reqURL := *sc.config.SnapshotAddr
 	reqURL.Path = reqURL.Path + "api/snapshots"
-	log.Debugf("Posting snapshot to: %s", reqURL.String())
+	log.Printf("Posting snapshot to: %s", reqURL.String())
 
 	req, err := http.NewRequest("post", reqURL.String(), bytes.NewReader(b))
 	if err != nil {
@@ -282,18 +283,18 @@ func (gpt *grafanaProxyTransport) RoundTrip(req *http.Request) (*http.Response, 
 func (sc *SnapClient) fetchDataPointsPrometheus(config *TakeConfig, target, datasource map[string]interface{}, step float64) ([]snapshotData, error) {
 	reqURL := *sc.config.GrafanaAddr
 	reqURL.Path = reqURL.Path + "api/datasources/proxy/" + strconv.Itoa(int(datasource["id"].(float64)))
-	log.Debugf("Requesting data points from: %s", reqURL.String())
+	log.Printf("Requesting data points from: %s", reqURL.String())
 
 	// Use our Grafana proxy transport with configured API key
 	transport := grafanaProxyTransport{grafanaAPIKey: sc.config.GrafanaAPIKey}
-	client, err := prometheus.New(prometheus.Config{Address: reqURL.String(), Transport: &transport})
+	client, err := api.NewClient(api.Config{Address: reqURL.String(), RoundTripper: &transport})
 	if err != nil {
 		return nil, err
 	}
-	api := prometheus.NewQueryAPI(client)
+	api := v1.NewAPI(client)
 
 	// Query
-	val, err := api.QueryRange(context.Background(), target["expr"].(string), prometheus.Range{
+	val, err := api.QueryRange(context.Background(), target["expr"].(string), v1.Range{
 		Start: *config.From,
 		End:   *config.To,
 		Step:  time.Duration(step) * time.Second,
