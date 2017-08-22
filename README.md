@@ -1,7 +1,11 @@
 # snapshot_grafana
+
 CLI tool to take snapshots of grafana dashboards
 
+Currently supports only the Prometheus datasource.
+
 # Warning
+
 This tool is very much in development and is likely to change considerably.
 
 # Todo

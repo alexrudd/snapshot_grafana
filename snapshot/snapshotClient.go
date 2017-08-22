@@ -85,6 +85,9 @@ func (sc *SnapClient) Take(config *TakeConfig) (*Snapshot, error) {
 	if err = json.Unmarshal([]byte(subbedDashString), &dash); err != nil {
 		return nil, fmt.Errorf("Could not decode dashboard json: %s", err.Error())
 	}
+	if dash["dashboard"] == nil {
+		return nil, fmt.Errorf(dash["message"].(string))
+	}
 
 	// For each row in dashboard...
 	for _, row := range dash["dashboard"].(map[string]interface{})["rows"].([]interface{}) {
@@ -104,7 +107,8 @@ func (sc *SnapClient) Take(config *TakeConfig) (*Snapshot, error) {
 					intervalFactor = target["intervalFactor"].(float64)
 				}
 				interval := time.Second * 30
-				if target["interval"] != nil {
+				if target["interval"] != nil && target["interval"].(string) != "" {
+					log.Printf(target["interval"].(string))
 					interval, err = time.ParseDuration(target["interval"].(string))
 				}
 				if err != nil {
