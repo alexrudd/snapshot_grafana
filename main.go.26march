@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"time"
+
 	"github.com/alexrudd/snapshot_grafana/snapshot"
 )
 
@@ -120,7 +121,6 @@ func stdout(msg string) {
 }
 
 func main() {
-
 	// Configure
 	config, takeConfig, err := parseAndValidateFlags()
 	if err != nil {

@@ -14,11 +14,13 @@ import (
 	"strings"
 	"time"
 
+ "net/http/httputil"
+ "crypto/tls"
+
 	"log"
 	"github.com/prometheus/client_golang/api"
 	"github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/common/model"
-	"crypto/tls"
 )
 
 
@@ -72,24 +74,6 @@ func (sc *SnapClient) Take(config *TakeConfig) (*Snapshot, error) {
 		return nil, err
 	}
 
-
-	// get annotations
-	annotationsString, err := sc.getAnnotationsDef(c)
-//	fmt.Print(annotationsString)
-	if err != nil {
-		return nil, err
-	}
-	// Unmarshal it
-	var annot []interface{}
-	if err = json.Unmarshal([]byte(annotationsString), &annot); err != nil {
-		return nil, fmt.Errorf("Could not decode annotation json: %s", err.Error())
-	}
-	//if dash["dashboard"] == nil {
-		//return nil, fmt.Errorf(dash["message"].(string))
-	//}
-
-
-
 	// get dashboard
 	rawDashString, err := sc.getDashboardDef(c)
 	if err != nil {
@@ -118,149 +102,118 @@ func (sc *SnapClient) Take(config *TakeConfig) (*Snapshot, error) {
 		return nil, fmt.Errorf(dash["message"].(string))
 	}
 
+
+//fmt.Printf("+++++++++")
+//fmt.Printf(rawDashString)
+//fmt.Printf("---------")
+//fmt.Printf(subbedDashString)
+//fmt.Printf(".....................................")
+//fmt.Printf("....................................")
+/*
+ var x string
+ var xcity string
+  x = "Hello World"
+  xcity = "Hello World"
+
+fmt.Printf(x)
+fmt.Printf(xcity)
+*/
+//for k, v := range dash { 
+//    fmt.Printf("DASH key[%s] value[%s]\n", k, v)
+//}
+
+//	for _, row := range dash["dashboard"].(map[string]interface{}) {
+	//for _, row := range dash["dashboard"].(map[string]interface{})["panels"].([]interface{}) {
+//	for _,row := range dash["dashboard"].(map[string]interface{})["panels"].([]interface{}) {
+//fmt.Printf("inswide panel %s" ,row)
+
+	//		panel := row.(map[string]interface{})
+//fmt.Printf("inswide panel %s" ,panel)
+//}
+
+fmt.Printf("step 6c")
+
+
 	// For each row in dashboard...
-//	for _, row := range dash["dashboard"].(map[string]interface{})["rows"].([]interface{}) {
+	for _, row := range dash["dashboard"].(map[string]interface{})["rows"].([]interface{}) {
 		// For each panel in row...
+fmt.Printf("step 6a")
 //		for _, p := range row.(map[string]interface{})["panels"].([]interface{}) {
 		for _, p := range dash["dashboard"].(map[string]interface{})["panels"].([]interface{}) {
+fmt.Printf("step 7a")
 			panel := p.(map[string]interface{})
+fmt.Printf("step 7aa ")
+fmt.Printf(dash)
 			// Get the datasource and targets
-
-
-			//var targetData []interface{}
-
-			//var snapshotData []interface{}
-			var dataPoints []snapshotData
-			var snapshotData []interface{}
-
-			//anthony start
-			datasource_str, datasource_ok := panel["datasource"]
-
-			if datasource_ok && (datasource_str != nil) {
-
-
-				//Extract templates
-				query_templates := map[string]string{}
-				templates := dash["dashboard"].(map[string]interface{})["templating"].(map[string]interface{})["list"]
-				for _,templateVariables := range templates.([]interface{}) {
-					variable := templateVariables.(map[string]interface{})
-					fmt.Print(variable)
-					name := variable["name"].(string)
-					current := variable["current"]
-					current_fields := current.(map[string]interface{})
-					current_text := current_fields["text"].(string)
-					current_text = strings.Replace(current_text,"+","|", -1)
-					query_templates[name] = current_text
+			datasourceName := panel["datasource"].(string)
+fmt.Printf("step 7ab")
+			targets := panel["targets"].([]interface{})
+			// For each target in panel...
+			for _, t := range targets {
+fmt.Printf("step 7b")
+				target := t.(map[string]interface{})
+				// Calculate “step” like Grafana. For the original code, see:
+				// https://github.com/grafana/grafana/blob/79138e211fac98bf1d12f1645ecd9fab5846f4fb/public/app/plugins/datasource/prometheus/datasource.ts#L83
+				intervalFactor := float64(1)
+				if target["intervalFactor"] != nil {
+					intervalFactor = target["intervalFactor"].(float64)
 				}
+				interval := time.Second * 30
+				if target["interval"] != nil && target["interval"].(string) != "" {
+					log.Printf(target["interval"].(string))
+					interval, err = time.ParseDuration(target["interval"].(string))
+				}
+				if err != nil {
+					return nil, err
+				}
+				step := interval.Seconds() * intervalFactor
+				// Lookup datasource
+				datasource := datasourceMap[datasourceName].(map[string]interface{})
 
-
-
-				datasourceName := panel["datasource"].(string)
-				targets := panel["targets"].([]interface{})
-				// For each target in panel...
-				for _, t := range targets {
-					target := t.(map[string]interface{})
-					// Calculate “step” like Grafana. For the original code, see:
-					// https://github.com/grafana/grafana/blob/79138e211fac98bf1d12f1645ecd9fab5846f4fb/public/app/plugins/datasource/prometheus/datasource.ts#L83
-					intervalFactor := float64(1)
-					if target["intervalFactor"] != nil {
-						intervalFactor = target["intervalFactor"].(float64)
-					}
-					interval := time.Second * 30
-					if target["interval"] != nil && target["interval"].(string) != "" {
-						log.Printf(target["interval"].(string))
-						interval, err = time.ParseDuration(target["interval"].(string))
-					}
+fmt.Printf("step 7c")
+				// Fetch data points from datasource proxy
+				var dataPoints []snapshotData
+				switch datasource["type"].(string) {
+				case "prometheus":
+					dataPoints, err = sc.fetchDataPointsPrometheus(c, target, datasource, step)
 					if err != nil {
 						return nil, err
 					}
-					step := interval.Seconds() * intervalFactor
-					// Lookup datasource
-					datasource := datasourceMap[datasourceName].(map[string]interface{})
-
-
-
-					//repplace template variables
-					// peak=~"^[[peak]]$"
-					actual_query := target["expr"].(string)
-					for key, value := range query_templates {
-
-					//	if strings.Contains(actual_query, "^[[peak]]$") {
-					//		actual_query = strings.Replace(actual_query, "^[[peak]]$", "AF | WN", -1)
-					//	}
-						if strings.Contains(actual_query, "^[["+key+"]]$") {
-							if value == "All" {
-						//		actual_query = strings.Replace(actual_query, "^[["+key+"]]$", "^.*$", -1)
-							} else {
-						//		actual_query = strings.Replace(actual_query, "^[["+key+"]]$", value, -1)
-							}
-						}
+				case "elasticsearch":
+					dataPoints, err = sc.fetchDataPointsElastic(c, target, datasource, step)
+					if err != nil {
+						return nil, err
 					}
-					//actual_query = strings.Replace(actual_query, "sum","aasumaa", -1)
-
-					target["expr"] = actual_query
-					// Fetch data points from datasource proxy
-
-				//	var dataPoints []snapshotData
-					switch datasource["type"].(string) {
-					case "prometheus":
-						dataPoints, err = sc.fetchDataPointsPrometheus(c, target, datasource, step)
-						if err != nil {
-							return nil, err
-						}
-					case "elasticsearch":
-						dataPoints, err = sc.fetchDataPointsElastic(c, target, datasource, step)
-						if err != nil {
-							return nil, err
-						}
-					default:
-						// unsupported
-						continue
-					}
-
-				//	var snapshotData []interface{}
-					// build snapshot data
-					for idx, dp := range dataPoints {
-						if target["legendFormat"] != nil && target["legendFormat"].(string) != "" {
-							dp.Target = sc.renderTemplate(target["legendFormat"].(string), dp.Metric)
-						} else {
-							dp.Target = dp.Metric.String()
-						}
-						dataPoints[idx] = dp
-						snapshotData = append(snapshotData, dp)
-					}
-					if snapshotData == nil {
-						snapshotData = []interface{}{}
-					}
-					// insert snapshot data into panels
-
-				//	targetData = append(targetData, snapshotData)
-
-
-					panel["snapshotData"] = snapshotData
-					panel["targets"] = []interface{}{}
-					panel["links"] = []interface{}{}
-					panel["datasource"] = []interface{}{}
+				default:
+					// unsupported
+					continue
 				}
-				//panel["snapshotData"] = snapshotData
 
 
+fmt.Printf("step 8")
+
+				var snapshotData []interface{}
 				// build snapshot data
-			//	for _,aa := range targetData {
-			//		aa[0].Datapoints
-					//panel := aa.(map[string]interface{})
-					//rr := aa[0]["Datapoints"]
-
-			//		fmt.Print(aa);
-			//	}
-
-
-
-			}  //end to if datasource_ok
-
-
+				for idx, dp := range dataPoints {
+					if target["legendFormat"] != nil && target["legendFormat"].(string) != "" {
+						dp.Target = sc.renderTemplate(target["legendFormat"].(string), dp.Metric)
+					} else {
+						dp.Target = dp.Metric.String()
+					}
+					dataPoints[idx] = dp
+					snapshotData = append(snapshotData, dp)
+				}
+				if snapshotData == nil {
+					snapshotData = []interface{}{}
+				}
+				// insert snapshot data into panels
+				panel["snapshotData"] = snapshotData
+				panel["targets"] = []interface{}{}
+				panel["links"] = []interface{}{}
+				panel["datasource"] = []interface{}{}
+			}
 		}
-//	}
+	}
 
 	// Build Snapshot
 	snapshot := make(map[string]interface{})
@@ -272,19 +225,52 @@ func (sc *SnapClient) Take(config *TakeConfig) (*Snapshot, error) {
 	snapshot["dashboard"] = dash["dashboard"]
 	snapshot["expires"] = (c.Expires / time.Second)
 	snapshot["name"] = c.SnapshotName
-
-	snapshot["annotations"] = annot
 	b, err := json.Marshal(snapshot)
 
 	// Post Snapshot
 	reqURL := *sc.config.SnapshotAddr
-	reqURL.Path = reqURL.Path + "api/snapshots"
+//	reqURL.Path = reqURL.Path + "api/snapshots"
+reqURL.Path = "https://grafana-argos.router.openshift.int-a.argos-prd.172.30.19.187.nip.io/api/snapshots" 
+	log.Printf("Posting snapshot to: %s", reqURL.String())
 
 ///
+/*
+
+defaultTransport := http.DefaultTransport.(*http.Transport)
+
+// Create new Transport that ignores self-signed SSL
+
+httpClientWithSelfSignedTLS := &http.Transport{
+  Proxy:                 defaultTransport.Proxy,
+  DialContext:           defaultTransport.DialContext,
+  MaxIdleConns:          defaultTransport.MaxIdleConns,
+  IdleConnTimeout:       defaultTransport.IdleConnTimeout,
+  ExpectContinueTimeout: defaultTransport.ExpectContinueTimeout,
+  TLSHandshakeTimeout:   defaultTransport.TLSHandshakeTimeout,
+  TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
+}
+*/
+
+//client := &http.Client{Transport:httpClientWithSelfSignedTLS }
+
+//	req, err := client.Post(reqURL.String(), "application/json",bytes.NewReader(b))
+
+//http.DefaultTransport.(*http.Transport).TLSClientConfig.InsecureSkipVerify = true
+
 http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+
 ////
 
 
+///
+//  tr := &http.Transport{DisableKeepAlives: false}
+/*
+ tr := &http.Transport{
+        TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+    }
+    hc := &http.Client{Timeout: 20 * time.Second, Transport: tr}
+*/
+////
 
 
 	//req, err := http.NewRequest("post", reqURL.String(), bytes.NewReader(b))
@@ -295,6 +281,10 @@ http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSk
 	req.Header.Add("Authorization", "Bearer "+sc.config.SnapshotAPIKey)
 	req.Header.Add("Content-Type", "application/json")
 	resp, err := (&http.Client{}).Do(req)
+
+//resp, err := (&http.Client{Transport:httpClientWithSelfSignedTLS}).Do(req)
+
+//	resp, err := client.Do(req)
 
 	if err != nil {
 		return nil, err
@@ -319,23 +309,58 @@ http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSk
 
 func (sc *SnapClient) getDashboardDef(config *TakeConfig) (string, error) {
 	// Get dashboard def
+
+
+
 ///
+/*
+defaultTransport := http.DefaultTransport.(*http.Transport)
+
+// Create new Transport that ignores self-signed SSL
+
+httpClientWithSelfSignedTLS := &http.Transport{
+  Proxy:                 defaultTransport.Proxy,
+  DialContext:           defaultTransport.DialContext,
+  MaxIdleConns:          defaultTransport.MaxIdleConns,
+  IdleConnTimeout:       defaultTransport.IdleConnTimeout,
+  ExpectContinueTimeout: defaultTransport.ExpectContinueTimeout,
+  TLSHandshakeTimeout:   defaultTransport.TLSHandshakeTimeout,
+  TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
+}
+*/
 http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+ 
 ///
    
 	reqURL := *sc.config.GrafanaAddr
-	reqURL.Path = reqURL.Path + "api/dashboards/db/" + config.DashSlug
+//	reqURL.Path = reqURL.Path + "api/dashboards/db/" + config.DashSlug
+//reqURL.Path = "https://grafana-argos.router.openshift.int-a.argos-prd.172.30.19.187.nip.io/api/dashboards/db/cml_swa_poc-cckiuq" 
+//reqURL.Path = "http://grafana-argos.router.openshift.int-a.argos-prd.172.30.19.187.nip.io/api/dashboards/db/cml_swa_poc-cckiuq" 
+reqURL.Path = "http://grafana-argos.router.openshift.int-a.argos-prd.172.30.19.187.nip.io/api/dashboards/db/"+ config.DashSlug 
 
-	req, err := http.NewRequest("GET", reqURL.String(), nil)
+	//req, err := http.NewRequest("get", reqURL.String(), nil)
+	req, err := http.NewRequest("GET", "https://grafana-argos.router.openshift.int-a.argos-prd.172.30.19.187.nip.io/api/dashboards/db/"+config.DashSlug, nil)
+	//req, err := http.NewRequest("GET", "https://grafana-argos.router.openshift.int-a.argos-prd.172.30.19.187.nip.io/api/dashboards/db/cml_swa_poc-cckiuq", nil)
 	if err != nil {
 		return "", err
 	}
 
-//debug(httputil.DumpRequestOut(req, true))
+debug(httputil.DumpRequestOut(req, true))
+
 
 	req.Header.Add("Authorization", "Bearer "+sc.config.GrafanaAPIKey)
 
+/*
+ tr := &http.Transport{
+        TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+    }
+    hc := &http.Client{Timeout: 22 * time.Second, Transport: tr}
+*/
 	resp, err := (&http.Client{}).Do(req)
+//resp, err := (&http.Client{Transport:httpClientWithSelfSignedTLS}).Do(req)
+//resp, err := hc.Do(req)
+
+
 	if err != nil {
 	//	return "", err
 	}
@@ -346,25 +371,52 @@ http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSk
 	//	return "", err
 	}
 
+
+//debug(httputil.DumpResponse(resp, true))
+ //fmt.Printf("YYYYYYY\n\n")
+// fmt.Printf("%s\n\n", string(body))
+
 	return string(body), nil
 }
 
 func (sc *SnapClient) getDatasourceDefs() (map[string]interface{}, error) {
 
 ///
+/*
+defaultTransport := http.DefaultTransport.(*http.Transport)
+
+// Create new Transport that ignores self-signed SSL
+
+httpClientWithSelfSignedTLS := &http.Transport{
+  Proxy:                 defaultTransport.Proxy,
+  DialContext:           defaultTransport.DialContext,
+  MaxIdleConns:          defaultTransport.MaxIdleConns,
+  IdleConnTimeout:       defaultTransport.IdleConnTimeout,
+  ExpectContinueTimeout: defaultTransport.ExpectContinueTimeout,
+  TLSHandshakeTimeout:   defaultTransport.TLSHandshakeTimeout,
+  TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
+}
+ http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+ */
+  
 http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 ////
 
 	// Get datasource defs
 	reqURL := *sc.config.GrafanaAddr
-	reqURL.Path = reqURL.Path + "api/datasources"
+//	reqURL.Path = reqURL.Path + "api/datasources"
 
-	req, err := http.NewRequest("GET", reqURL.String(), nil)
+reqURL.Path = "https://grafana-argos.router.openshift.int-a.argos-prd.172.30.19.187.nip.io/api/datasources" 
+
+	//req, err := http.NewRequest("get", reqURL.String(), nil)
+	req, err := http.NewRequest("GET", "https://grafana-argos.router.openshift.int-a.argos-prd.172.30.19.187.nip.io/api/datasources", nil)
+
 	req.Header.Add("Authorization", "Bearer "+sc.config.GrafanaAPIKey)
 	resp, err := (&http.Client{}).Do(req)
 
-//debug(httputil.DumpRequestOut(req, true))
+debug(httputil.DumpRequestOut(req, true))
 
+//resp, err := (&http.Client{Transport:httpClientWithSelfSignedTLS}).Do(req)
 
 	if err != nil {
 		return nil, err
@@ -372,7 +424,7 @@ http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSk
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		//return nil, errors.New("AA Unexpected status code: " + resp.Status)
-//  debug(httputil.DumpResponse(resp, true))
+  debug(httputil.DumpResponse(resp, true))
 		return nil, errors.New("AUA Unexpected status code: " + resp.Status)
 	}
 	// read body
@@ -381,11 +433,18 @@ http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSk
 		return nil, err
 	}
 
+
+
+       // fmt.Printf("%s\n\n", string(body))
+
 	// parse body
 	var datasources []interface{}
 	if err = json.Unmarshal(body, &datasources); err != nil {
 		return nil, err
 	}
+	
+
+
 
 // map datasources to their names
 	datasourceMap := make(map[string]interface{})
@@ -393,64 +452,24 @@ http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSk
 		datasourceMap[ds.(map[string]interface{})["name"].(string)] = ds
 	}
 
+
+
+
+for key := range datasourceMap {
+//        fmt.Printf("key="+key)
+    if key != "prometheus-argos"{
+ //       fmt.Printf("delete key="+key)
+        delete(datasourceMap, key)
+    }
+}
+
+for k, v := range datasourceMap { 
+    fmt.Printf("key[%s] value[%s]\n", k, v)
+}
+        fmt.Printf("STEP 2")
+
 return datasourceMap, nil
 }
-
-
-
-
-
-
-
-//////////
-
-func (sc *SnapClient) getAnnotationsDef(config *TakeConfig) (string, error) {
-	// Get dashboard def
-	///
-	http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-	///
-
-	reqURL := *sc.config.GrafanaAddr
-	from := strconv.FormatInt( (config.From.UTC().Unix()*1000),10)
-
-	to := strconv.FormatInt((config.To.UTC().Unix()*1000),10)
-	//reqURL.Path = reqURL.Path + "api/annotations?from=" + "aa" + "&to=" + config.To.UTC().Unix();
-
-	//reqURL.Path = reqURL.Path + "api/annotations?from=" + from + "&to=" + to
-
-
-	params := "api/annotations?from=" + from + "&to=" + to
-
-	fmt.Print(reqURL.String()+params);
-
-
-	//req, err := http.NewRequest("GET", reqURL.String(), nil)
-	req, err := http.NewRequest("GET", reqURL.String()+params, nil)
-	if err != nil {
-		return "", err
-	}
-
-	//debug(httputil.DumpRequestOut(req, true))
-
-	req.Header.Add("Authorization", "Bearer "+sc.config.GrafanaAPIKey)
-
-	resp, err := (&http.Client{}).Do(req)
-	if err != nil {
-		//	return "", err
-	}
-	defer resp.Body.Close()
-	body, err := ioutil.ReadAll(resp.Body)
-
-	if err != nil {
-		//	return "", err
-	}
-
-	return string(body), nil
-}
-
-////////
-
-
 
 func (sc *SnapClient) substituteVars(config *TakeConfig, dashboardString string) (string, error) {
 	for k, v := range config.Vars {
@@ -472,20 +491,13 @@ type grafanaProxyTransport struct {
 func (gpt *grafanaProxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	req.Header.Add("Authorization", "Bearer "+gpt.grafanaAPIKey)
 
-//	http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-
-	return (&http.Transport{ TLSClientConfig: &tls.Config{InsecureSkipVerify: true},}).RoundTrip(req)
+	return (&http.Transport{}).RoundTrip(req)
 }
 
 func (sc *SnapClient) fetchDataPointsPrometheus(config *TakeConfig, target, datasource map[string]interface{}, step float64) ([]snapshotData, error) {
 	reqURL := *sc.config.GrafanaAddr
 	reqURL.Path = reqURL.Path + "api/datasources/proxy/" + strconv.Itoa(int(datasource["id"].(float64)))
 	log.Printf("Requesting data points from: %s", reqURL.String())
-
-	////
-	http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-	////
-
 
 	// Use our Grafana proxy transport with configured API key
 	transport := grafanaProxyTransport{grafanaAPIKey: sc.config.GrafanaAPIKey}
