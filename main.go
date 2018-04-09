@@ -20,7 +20,8 @@ var (
 	dashSlug        = flag.String("dashboard_slug", "", "The url friendly version of the dashboard title to snapshot from the \"grafana_addr\" address.")
 	snapshotExpires = flag.Duration("snapshot_expires", 0, "How long to keep the snapshot for (60s, 1h, 10d, etc), defaults to never.")
 	snapshotName    = flag.String("snapshot_name", "", "What to call the snapshot. Defaults to \"from\" date plus dashboard slug.")
-	fromTimestamp   = flag.String("from", (time.Now().Truncate(time.Hour * 24)).Format(timeLayout), "The \"from\" time range. Must be absolute in the form \"YYYY-MM-DD HH:mm:ss\" (\"2017-01-23 12:34:56\"). Defaults to start of day.")
+//	fromTimestamp   = flag.String("from", (time.Now().Truncate(time.Hour * 24)).Format(timeLayout), "The \"from\" time range. Must be absolute in the form \"YYYY-MM-DD HH:mm:ss\" (\"2017-01-23 12:34:56\"). Defaults to start of day.")
+	fromTimestamp   = flag.String("from", (time.Now().AddDate(0, 0, -1)).Format(timeLayout), "The \"from\" time range. Must be absolute in the form \"YYYY-MM-DD HH:mm:ss\" (\"2017-01-23 12:34:56\"). Defaults to start of day.")
 	toTimestamp     = flag.String("to", time.Now().Format(timeLayout), "The \"to\" time range. Must be absolute in the form \"YYYY-MM-DD HH:mm:ss\" (\"2017-01-23 12:34:57\"). Must be greater than to \"to\" value. Defaults to now")
 	templateVars    = flag.String("template_vars", "", "a list of key value pairs to set the dashboard's template variables, in the format 'key1=val1;key2=val2'")
 )
@@ -140,5 +141,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	stdout(fmt.Sprintf("%s%s%s", config.GrafanaAddr.String(), "dashboard/snapshot/", snapshot.Key))
+//	stdout(fmt.Sprintf("%s%s%s", config.GrafanaAddr.String(), "dashboard/snapshot/", snapshot.Key))
+	stdout(fmt.Sprintf("%s%s%s%s", config.GrafanaAddr.String(), "dashboard/snapshot/", snapshot.Key,"?kiosk&theme=light"))
 }
