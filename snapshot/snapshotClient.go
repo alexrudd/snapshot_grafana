@@ -115,7 +115,7 @@ func (sc *SnapClient) Take(config *TakeConfig) (*Snapshot, error) {
 
 
 	//Extract templates
-	templates_orig := dash["dashboard"].(map[string]interface{})["templating"]
+//do not delete:  	templates_orig := dash["dashboard"].(map[string]interface{})["templating"]
 	query_templates := map[string]string{}
 	templates := dash["dashboard"].(map[string]interface{})["templating"].(map[string]interface{})["list"]
 	for _,templateVariables := range templates.([]interface{}) {
@@ -176,6 +176,7 @@ func (sc *SnapClient) Take(config *TakeConfig) (*Snapshot, error) {
 					target["expr"] = actual_query
 					// Fetch data points from datasource proxy
 
+
 					switch datasource["type"].(string) {
 					case "prometheus":
 						dataPoints, err = sc.fetchDataPointsPrometheus(c, target, datasource, step)
@@ -199,6 +200,51 @@ func (sc *SnapClient) Take(config *TakeConfig) (*Snapshot, error) {
 						} else {
 							dp.Target = dp.Metric.String()
 						}
+
+
+						// FILL IN MISSING VALUES
+						// loop for all timestamps,and for missing step values assign =0, the trick is doing it by step not by minute
+						// there is a more efficient way to do this code below, but my goal is just to get it working for now
+						// STEP1 add missing values as zero
+						start_seconds := c.From.UTC().Unix()
+						for start_seconds <= c.To.UTC().Unix() {
+							start_milliseconds := (start_seconds * 1000)
+						    timestamp_exists := false
+						for _,dpoint := range dp.Datapoints {
+							datapoint_timestamp := int64(dpoint[1].(float64))
+							if ( datapoint_timestamp == start_milliseconds) {
+								timestamp_exists = true
+							}
+						}
+
+						if ( timestamp_exists == false) {
+							missing_data := make([]interface{}, 2)
+							missing_data[0] = 0  //nil
+							missing_data[1] = float64(start_milliseconds)
+							dp.Datapoints = append(dp.Datapoints, missing_data)
+						}
+						start_seconds = start_seconds +  int64(step)
+						}
+
+						/// STEP 2
+						///next sort the missing values added to the existing values, sort ascending by time
+						new_Datapoints := make([][]interface{},len(dp.Datapoints))
+						start_seconds = c.From.UTC().Unix()
+						index := 0
+						for start_seconds <= c.To.UTC().Unix() {
+							start_milliseconds := (start_seconds * 1000)
+							for _,dpoint := range dp.Datapoints {
+								datapoint_timestamp := int64(dpoint[1].(float64))
+								if ( datapoint_timestamp == start_milliseconds) {
+								  new_Datapoints[index] = dpoint
+								}
+							}
+							index = index + 1
+							start_seconds = start_seconds +  int64(step)
+						}
+						dp.Datapoints= new_Datapoints
+						/// end FILL IN MISSING VALUES
+
 						dataPoints[idx] = dp
 						snapshotData = append(snapshotData, dp)
 					}
@@ -216,26 +262,27 @@ func (sc *SnapClient) Take(config *TakeConfig) (*Snapshot, error) {
 
 	// Build Snapshot
 	snapshot := make(map[string]interface{})
-	// remove templating
-	// dash["dashboard"].(map[string]interface{})["templating"].(map[string]interface{})["list"] = []interface{}{}
+
 	// update time range
 	dash["dashboard"].(map[string]interface{})["time"].(map[string]interface{})["from"] = c.From.Format(time.RFC3339Nano)
 	dash["dashboard"].(map[string]interface{})["time"].(map[string]interface{})["to"] = c.To.Format(time.RFC3339Nano)
 	snapshot["dashboard"] = dash["dashboard"]
 	snapshot["expires"] = (c.Expires / time.Second)
-	fmt.Print(c.Expires / time.Second)
 
 	snapshot["name"] = c.SnapshotName
 
+	snapshot["timezone"] = "browser"
+
+
+	/*
 	meta := make(map[string]interface{})
 	meta["isShotshot"] = true
 	meta["canAdmin"] = false
 	meta["type"] = "snapshot"
 	snapshot["meta"] = meta
-	//meta["expires"] = time.Now().Add(time.Minute*1)
+*/
 
-
-	newAnnotationsString := "{\"enable\":true,\"iconColor\":\"rgba(0, 211, 255, 1)\", \"name\":\"annotations & Alerts\",\"snapshotData\":"+annotationsString+"}"
+	newAnnotationsString := "{\"enable\":true,\"iconColor\":\"rgba(0, 211, 255, 1)\", \"name\":\"Annotations\",\"snapshotData\":"+annotationsString+"}"
 //    	newAnnotationsString := "{\"enable\":true,\"iconColor\":\"rgba(0, 211, 255, 1)\",\"snapshotData\":"+annotationsString+"}"
 
 	var annot_fields map[string]interface{}
@@ -258,10 +305,10 @@ func (sc *SnapClient) Take(config *TakeConfig) (*Snapshot, error) {
 	dash["dashboard"].(map[string]interface{})["annotations"] = final_annot
 //	dash["dashboard"].(map[string]interface{})["annotations"].(map[string]interface{})["list"] = []interface{}{}
 
-	//	xx_templates["list"] = templates_orig
-	//snapshot["templating"] = xx_templates
-//	snapshot["templating"] = templates_orig
-	dash["dashboard"].(map[string]interface{})["templating"] = templates_orig
+
+	// remove templating
+	 dash["dashboard"].(map[string]interface{})["templating"].(map[string]interface{})["list"] = []interface{}{}
+	//dash["dashboard"].(map[string]interface{})["templating"] = templates_orig
 
 
 	b, err := json.Marshal(snapshot)
