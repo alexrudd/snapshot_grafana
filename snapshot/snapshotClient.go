@@ -296,6 +296,33 @@ func (sc *SnapClient) Take(config *TakeConfig) (*Snapshot, error) {
 	annot_surround_array[0] = annot_fields
 	annot_list["list"] = annot_surround_array
 
+
+	//june 13
+	//original := &annot_fields
+	//copy1 := original.
+	/*
+	annot_surround_array2 := make([]interface{}, 1)
+	annot_surround_array2[0] = &annot_fields
+	*/
+	//	byt, _ := json.Marshal(&annot_list)
+//	json.Unmarshal(byt, &annot_surround_array2[0])
+
+//	annot_surround_array1 := make(map[string]interface{}, 5)
+//	json.Unmarshal(byt, annot_surround_array1)
+
+	/*
+	annot_surround_array1 := make(map[string]interface{}, 5)
+	annot_surround_array1[0] = annot_fields
+
+	for index, value := range annot_fields {
+		annot_surround_array1[0] [index]= value
+	}
+
+	annot_list["list"] = annot_surround_array1
+	*/
+	//end
+
+
 	final_annot := make(map[string]interface{})["aa"]
 	final_annot = annot_list
 
@@ -312,6 +339,8 @@ func (sc *SnapClient) Take(config *TakeConfig) (*Snapshot, error) {
 
 
 	b, err := json.Marshal(snapshot)
+
+	//print(string(b[:]))	  //anthony june 13
 
 	// Post Snapshot
 	reqURL := *sc.config.SnapshotAddr
@@ -425,6 +454,7 @@ func (sc *SnapClient) getAnnotationsDef(config *TakeConfig) (string, error) {
 	from := strconv.FormatInt( (config.From.UTC().Unix()*1000),10)
 	to := strconv.FormatInt((config.To.UTC().Unix()*1000),10)
 	params := "api/annotations?from=" + from + "&to=" + to
+	//params := "api/annotations?from=" + from + "&to=" + to+ "&dashboardId=44"
 
 	req, err := http.NewRequest("GET", reqURL.String()+params, nil)
 	if err != nil {
