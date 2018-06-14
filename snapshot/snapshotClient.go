@@ -18,7 +18,18 @@ import (
 	"github.com/prometheus/client_golang/api"
 	"github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/common/model"
+	"crypto/tls"
+
 )
+
+
+func debug(data []byte, err error) {
+    if err == nil {
+        fmt.Printf("%s\n\n", data)
+    } else {
+        log.Fatalf("%s\n\n", err)
+    }
+}
 
 // SnapClient is for taking multiple snapshots of a Grafana instance and posting
 // them to a snapshot host
@@ -61,6 +72,19 @@ func (sc *SnapClient) Take(config *TakeConfig) (*Snapshot, error) {
 		return nil, err
 	}
 
+
+	// get annotations
+	annotationsString, err := sc.getAnnotationsDef(c)
+	if err != nil {
+		return nil, err
+	}
+	// Unmarshal it
+	var annot []interface{}
+	if err = json.Unmarshal([]byte(annotationsString), &annot); err != nil {
+		return nil, fmt.Errorf("Could not decode annotation json: %s", err.Error())
+	}
+
+
 	// get dashboard
 	rawDashString, err := sc.getDashboardDef(c)
 	if err != nil {
@@ -89,99 +113,249 @@ func (sc *SnapClient) Take(config *TakeConfig) (*Snapshot, error) {
 		return nil, fmt.Errorf(dash["message"].(string))
 	}
 
-	// For each row in dashboard...
-	for _, row := range dash["dashboard"].(map[string]interface{})["rows"].([]interface{}) {
-		// For each panel in row...
-		for _, p := range row.(map[string]interface{})["panels"].([]interface{}) {
+
+	//Extract templates
+//do not delete:  	templates_orig := dash["dashboard"].(map[string]interface{})["templating"]
+	query_templates := map[string]string{}
+	templates := dash["dashboard"].(map[string]interface{})["templating"].(map[string]interface{})["list"]
+	for _,templateVariables := range templates.([]interface{}) {
+		variable := templateVariables.(map[string]interface{})
+		name := variable["name"].(string)
+		current := variable["current"]
+		current_fields := current.(map[string]interface{})
+		current_text := current_fields["text"].(string)
+		current_text = strings.Replace(current_text,"+","|", -1)
+		query_templates[name] = current_text
+	}
+
+		for _, p := range dash["dashboard"].(map[string]interface{})["panels"].([]interface{}) {
 			panel := p.(map[string]interface{})
 			// Get the datasource and targets
-			datasourceName := panel["datasource"].(string)
-			targets := panel["targets"].([]interface{})
-			// For each target in panel...
-			for _, t := range targets {
-				target := t.(map[string]interface{})
-				// Calculate “step” like Grafana. For the original code, see:
-				// https://github.com/grafana/grafana/blob/79138e211fac98bf1d12f1645ecd9fab5846f4fb/public/app/plugins/datasource/prometheus/datasource.ts#L83
-				intervalFactor := float64(1)
-				if target["intervalFactor"] != nil {
-					intervalFactor = target["intervalFactor"].(float64)
-				}
-				interval := time.Second * 30
-				if target["interval"] != nil && target["interval"].(string) != "" {
-					log.Printf(target["interval"].(string))
-					interval, err = time.ParseDuration(target["interval"].(string))
-				}
-				if err != nil {
-					return nil, err
-				}
-				step := interval.Seconds() * intervalFactor
-				// Lookup datasource
-				datasource := datasourceMap[datasourceName].(map[string]interface{})
 
-				// Fetch data points from datasource proxy
-				var dataPoints []snapshotData
-				switch datasource["type"].(string) {
-				case "prometheus":
-					dataPoints, err = sc.fetchDataPointsPrometheus(c, target, datasource, step)
+			var dataPoints []snapshotData
+			var snapshotData []interface{}
+
+			datasource_str, datasource_ok := panel["datasource"]
+			if datasource_ok && (datasource_str != nil) {
+				datasourceName := panel["datasource"].(string)
+				targets := panel["targets"].([]interface{})
+				// For each target in panel...
+				for _, t := range targets {
+					target := t.(map[string]interface{})
+					// Calculate “step” like Grafana. For the original code, see:
+					// https://github.com/grafana/grafana/blob/79138e211fac98bf1d12f1645ecd9fab5846f4fb/public/app/plugins/datasource/prometheus/datasource.ts#L83
+					intervalFactor := float64(1)
+					if target["intervalFactor"] != nil {
+						intervalFactor = target["intervalFactor"].(float64)
+					}
+					interval := time.Second * 30
+					if target["interval"] != nil && target["interval"].(string) != "" {
+						log.Printf(target["interval"].(string))
+						interval, err = time.ParseDuration(target["interval"].(string))
+					}
 					if err != nil {
 						return nil, err
 					}
-				case "elasticsearch":
-					dataPoints, err = sc.fetchDataPointsElastic(c, target, datasource, step)
-					if err != nil {
-						return nil, err
+					step := interval.Seconds() * intervalFactor
+					// Lookup datasource
+					datasource := datasourceMap[datasourceName].(map[string]interface{})
+
+
+					//replace template variables
+					actual_query := target["expr"].(string)
+					for key, value := range query_templates {
+						if strings.Contains(actual_query, "^[["+key+"]]$") {
+							if value == "All" {
+								actual_query = strings.Replace(actual_query, "^[["+key+"]]$", "^.*$", -1)
+							} else {
+								actual_query = strings.Replace(actual_query, "^[["+key+"]]$", value, -1)
+							}
+						}
 					}
-				default:
-					// unsupported
-					continue
-				}
-				var snapshotData []interface{}
-				// build snapshot data
-				for idx, dp := range dataPoints {
-					if target["legendFormat"] != nil && target["legendFormat"].(string) != "" {
-						dp.Target = sc.renderTemplate(target["legendFormat"].(string), dp.Metric)
-					} else {
-						dp.Target = dp.Metric.String()
+
+					target["expr"] = actual_query
+					// Fetch data points from datasource proxy
+
+
+					switch datasource["type"].(string) {
+					case "prometheus":
+						dataPoints, err = sc.fetchDataPointsPrometheus(c, target, datasource, step)
+						if err != nil {
+							return nil, err
+						}
+					case "elasticsearch":
+						dataPoints, err = sc.fetchDataPointsElastic(c, target, datasource, step)
+						if err != nil {
+							return nil, err
+						}
+					default:
+						// unsupported
+						continue
 					}
-					dataPoints[idx] = dp
-					snapshotData = append(snapshotData, dp)
+
+					// build snapshot data
+					for idx, dp := range dataPoints {
+						if target["legendFormat"] != nil && target["legendFormat"].(string) != "" {
+							dp.Target = sc.renderTemplate(target["legendFormat"].(string), dp.Metric)
+						} else {
+							dp.Target = dp.Metric.String()
+						}
+
+
+						// FILL IN MISSING VALUES
+						// loop for all timestamps,and for missing step values assign =0, the trick is doing it by step not by minute
+						// there is a more efficient way to do this code below, but my goal is just to get it working for now
+						// STEP1 add missing values as zero
+						start_seconds := c.From.UTC().Unix()
+						for start_seconds <= c.To.UTC().Unix() {
+							start_milliseconds := (start_seconds * 1000)
+						    timestamp_exists := false
+						for _,dpoint := range dp.Datapoints {
+							datapoint_timestamp := int64(dpoint[1].(float64))
+							if ( datapoint_timestamp == start_milliseconds) {
+								timestamp_exists = true
+							}
+						}
+
+						if ( timestamp_exists == false) {
+							missing_data := make([]interface{}, 2)
+							missing_data[0] = 0  //nil
+							missing_data[1] = float64(start_milliseconds)
+							dp.Datapoints = append(dp.Datapoints, missing_data)
+						}
+						start_seconds = start_seconds +  int64(step)
+						}
+
+						/// STEP 2
+						///next sort the missing values added to the existing values, sort ascending by time
+						new_Datapoints := make([][]interface{},len(dp.Datapoints))
+						start_seconds = c.From.UTC().Unix()
+						index := 0
+						for start_seconds <= c.To.UTC().Unix() {
+							start_milliseconds := (start_seconds * 1000)
+							for _,dpoint := range dp.Datapoints {
+								datapoint_timestamp := int64(dpoint[1].(float64))
+								if ( datapoint_timestamp == start_milliseconds) {
+								  new_Datapoints[index] = dpoint
+								}
+							}
+							index = index + 1
+							start_seconds = start_seconds +  int64(step)
+						}
+						dp.Datapoints= new_Datapoints
+						/// end FILL IN MISSING VALUES
+
+						dataPoints[idx] = dp
+						snapshotData = append(snapshotData, dp)
+					}
+					if snapshotData == nil {
+						snapshotData = []interface{}{}
+					}
+					// insert snapshot data into panels
+					panel["snapshotData"] = snapshotData
+					panel["targets"] = []interface{}{}
+					panel["links"] = []interface{}{}
+					panel["datasource"] = []interface{}{}
 				}
-				if snapshotData == nil {
-					snapshotData = []interface{}{}
-				}
-				// insert snapshot data into panels
-				panel["snapshotData"] = snapshotData
-				panel["targets"] = []interface{}{}
-				panel["links"] = []interface{}{}
-				panel["datasource"] = []interface{}{}
-			}
+			}  //end to if datasource_ok
 		}
-	}
 
 	// Build Snapshot
 	snapshot := make(map[string]interface{})
-	// remove templating
-	dash["dashboard"].(map[string]interface{})["templating"].(map[string]interface{})["list"] = []interface{}{}
+
 	// update time range
 	dash["dashboard"].(map[string]interface{})["time"].(map[string]interface{})["from"] = c.From.Format(time.RFC3339Nano)
 	dash["dashboard"].(map[string]interface{})["time"].(map[string]interface{})["to"] = c.To.Format(time.RFC3339Nano)
 	snapshot["dashboard"] = dash["dashboard"]
 	snapshot["expires"] = (c.Expires / time.Second)
+
 	snapshot["name"] = c.SnapshotName
+
+	snapshot["timezone"] = "browser"
+
+
+	/*
+	meta := make(map[string]interface{})
+	meta["isShotshot"] = true
+	meta["canAdmin"] = false
+	meta["type"] = "snapshot"
+	snapshot["meta"] = meta
+*/
+
+	newAnnotationsString := "{\"enable\":true,\"iconColor\":\"rgba(0, 211, 255, 1)\", \"name\":\"Annotations\",\"snapshotData\":"+annotationsString+"}"
+//    	newAnnotationsString := "{\"enable\":true,\"iconColor\":\"rgba(0, 211, 255, 1)\",\"snapshotData\":"+annotationsString+"}"
+
+	var annot_fields map[string]interface{}
+	if err = json.Unmarshal([]byte(newAnnotationsString), &annot_fields); err != nil {
+		return nil, fmt.Errorf("Could not decode dashboard json: %s", err.Error())
+	}
+
+
+	annot_list := make(map[string]interface{})
+	annot_surround_array := make([]interface{}, 1)
+	annot_surround_array[0] = annot_fields
+	annot_list["list"] = annot_surround_array
+
+
+	//june 13
+	//original := &annot_fields
+	//copy1 := original.
+	/*
+	annot_surround_array2 := make([]interface{}, 1)
+	annot_surround_array2[0] = &annot_fields
+	*/
+	//	byt, _ := json.Marshal(&annot_list)
+//	json.Unmarshal(byt, &annot_surround_array2[0])
+
+//	annot_surround_array1 := make(map[string]interface{}, 5)
+//	json.Unmarshal(byt, annot_surround_array1)
+
+	/*
+	annot_surround_array1 := make(map[string]interface{}, 5)
+	annot_surround_array1[0] = annot_fields
+
+	for index, value := range annot_fields {
+		annot_surround_array1[0] [index]= value
+	}
+
+	annot_list["list"] = annot_surround_array1
+	*/
+	//end
+
+
+	final_annot := make(map[string]interface{})["aa"]
+	final_annot = annot_list
+
+	// i need to add this undocumented annotation structure
+	// {"annotations":{"list":[{"enable":true,"iconColor":"rgba(0, 211, 255, 1)","name":"Annotations \u0026 Alerts","snapshotData":[{"alertId":0,"alertNa
+
+	dash["dashboard"].(map[string]interface{})["annotations"] = final_annot
+//	dash["dashboard"].(map[string]interface{})["annotations"].(map[string]interface{})["list"] = []interface{}{}
+
+
+	// remove templating
+	 dash["dashboard"].(map[string]interface{})["templating"].(map[string]interface{})["list"] = []interface{}{}
+	//dash["dashboard"].(map[string]interface{})["templating"] = templates_orig
+
+
 	b, err := json.Marshal(snapshot)
+
+	//print(string(b[:]))	  //anthony june 13
 
 	// Post Snapshot
 	reqURL := *sc.config.SnapshotAddr
 	reqURL.Path = reqURL.Path + "api/snapshots"
-	log.Printf("Posting snapshot to: %s", reqURL.String())
 
-	req, err := http.NewRequest("post", reqURL.String(), bytes.NewReader(b))
+    http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+
+	req, err := http.NewRequest("POST", reqURL.String(), bytes.NewReader(b))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Add("Authorization", "Bearer "+sc.config.SnapshotAPIKey)
 	req.Header.Add("Content-Type", "application/json")
 	resp, err := (&http.Client{}).Do(req)
+
 	if err != nil {
 		return nil, err
 	}
@@ -205,62 +379,105 @@ func (sc *SnapClient) Take(config *TakeConfig) (*Snapshot, error) {
 
 func (sc *SnapClient) getDashboardDef(config *TakeConfig) (string, error) {
 	// Get dashboard def
+http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+   
 	reqURL := *sc.config.GrafanaAddr
 	reqURL.Path = reqURL.Path + "api/dashboards/db/" + config.DashSlug
 
-	req, err := http.NewRequest("get", reqURL.String(), nil)
+	req, err := http.NewRequest("GET", reqURL.String(), nil)
 	if err != nil {
 		return "", err
 	}
+
 	req.Header.Add("Authorization", "Bearer "+sc.config.GrafanaAPIKey)
+
 	resp, err := (&http.Client{}).Do(req)
 	if err != nil {
-		return "", err
+	//	return "", err
 	}
 	defer resp.Body.Close()
 	body, err := ioutil.ReadAll(resp.Body)
+
 	if err != nil {
 		return "", err
 	}
+
 	return string(body), nil
 }
 
 func (sc *SnapClient) getDatasourceDefs() (map[string]interface{}, error) {
+
+http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+
 	// Get datasource defs
 	reqURL := *sc.config.GrafanaAddr
 	reqURL.Path = reqURL.Path + "api/datasources"
 
-	req, err := http.NewRequest("get", reqURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
+	req, err := http.NewRequest("GET", reqURL.String(), nil)
 	req.Header.Add("Authorization", "Bearer "+sc.config.GrafanaAPIKey)
 	resp, err := (&http.Client{}).Do(req)
+
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return nil, errors.New("Unexpected status code: " + resp.Status)
+		return nil, errors.New("AUA Unexpected status code: " + resp.Status)
 	}
 	// read body
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
+
 	// parse body
 	var datasources []interface{}
 	if err = json.Unmarshal(body, &datasources); err != nil {
 		return nil, err
 	}
-	// map datasources to their names
+
+// map datasources to their names
 	datasourceMap := make(map[string]interface{})
 	for _, ds := range datasources {
 		datasourceMap[ds.(map[string]interface{})["name"].(string)] = ds
 	}
 
-	return datasourceMap, nil
+return datasourceMap, nil
 }
+
+
+func (sc *SnapClient) getAnnotationsDef(config *TakeConfig) (string, error) {
+	// Get annotations def
+	http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+
+	reqURL := *sc.config.GrafanaAddr
+	from := strconv.FormatInt( (config.From.UTC().Unix()*1000),10)
+	to := strconv.FormatInt((config.To.UTC().Unix()*1000),10)
+	params := "api/annotations?from=" + from + "&to=" + to
+	//params := "api/annotations?from=" + from + "&to=" + to+ "&dashboardId=44"
+
+	req, err := http.NewRequest("GET", reqURL.String()+params, nil)
+	if err != nil {
+		return "", err
+	}
+
+	//debug(httputil.DumpRequestOut(req, true))
+	req.Header.Add("Authorization", "Bearer "+sc.config.GrafanaAPIKey)
+
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+
+	if err != nil {
+		return "", err
+	}
+
+	return string(body), nil
+}
+
 
 func (sc *SnapClient) substituteVars(config *TakeConfig, dashboardString string) (string, error) {
 	for k, v := range config.Vars {
@@ -281,13 +498,15 @@ type grafanaProxyTransport struct {
 // Adds the Grafana API key auth header to any request
 func (gpt *grafanaProxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	req.Header.Add("Authorization", "Bearer "+gpt.grafanaAPIKey)
-	return (&http.Transport{}).RoundTrip(req)
+	return (&http.Transport{ TLSClientConfig: &tls.Config{InsecureSkipVerify: true},}).RoundTrip(req)
 }
 
 func (sc *SnapClient) fetchDataPointsPrometheus(config *TakeConfig, target, datasource map[string]interface{}, step float64) ([]snapshotData, error) {
 	reqURL := *sc.config.GrafanaAddr
 	reqURL.Path = reqURL.Path + "api/datasources/proxy/" + strconv.Itoa(int(datasource["id"].(float64)))
 	log.Printf("Requesting data points from: %s", reqURL.String())
+
+	http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 
 	// Use our Grafana proxy transport with configured API key
 	transport := grafanaProxyTransport{grafanaAPIKey: sc.config.GrafanaAPIKey}
